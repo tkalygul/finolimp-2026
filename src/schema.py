@@ -1,26 +1,49 @@
 import pandas as pd
 
-# Обязательные колонки единой схемы данных
-REQUIRED_COLUMNS = [
-    "source",          # acts / etm / registry
-    "row_id",          # исходный файл + номер строки
-    "subagent_id",     # единый ID субагента
-    "period",          # ГГГГ-ММ
-    "ts",              # дата или дата со временем
-    "op_type",         # продажа / возврат / войд / оплата / обмен
-    "ticket10",        # 10-значный номер билета
-    "pnr",             # код брони
-    "passenger",       # нормализованное имя пассажира
-    "amount_orig",     # сумма в исходной валюте
-    "currency",        # валюта
-    "amount_kgs",      # сумма в сомах со знаком (плюс = депозит)
-    "created_by",      # автор / агент
-    "balance_after"    # остаток ETM после операции (только для etm)
-]
 
-def validate(df: pd.DataFrame) -> bool:
-    """Проверяет соответствие датафрейма единой схеме данных."""
-    missing_cols = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+class ValidationError(Exception):
+    """Кастомное исключение для ошибок валидации данных."""
+    pass
+
+
+# Эталонные схемы обязательных колонок для каждого файла проекта
+REQUIRED_COLUMNS = {
+    "acts": [
+        "date", "doc", "debet", "credit", "saldo_start", "saldo_end"
+    ],
+    "etm": [
+        "date", "txn_id", "amount", "amount_kgs", "balance_after", "agent"
+    ],
+    "registry": [
+        "date", "party", "tickets", "pax", "pnr"
+    ]
+}
+
+
+def validate(df: pd.DataFrame, dataset_type: str = "acts") -> pd.DataFrame:
+    """
+    Проверяет DataFrame на соответствие схеме:
+    1. Проверяет, что таблица не пустая.
+    2. Проверяет наличие обязательных колонок.
+    
+    :param df: pandas DataFrame для проверки
+    :param dataset_type: тип датасета ('acts', 'etm', 'registry')
+    :return: исходный DataFrame, если всё прошло успешно
+    """
+    if df is None or df.empty:
+        raise ValidationError(f"[Schema] Ошибка: Датасет '{dataset_type}' пустой или не был загружен!")
+
+    if dataset_type not in REQUIRED_COLUMNS:
+        raise ValidationError(f"[Schema] Ошибка: Неизвестный тип датасета '{dataset_type}'.")
+
+    expected_cols = REQUIRED_COLUMNS[dataset_type]
+    missing_cols = [col for col in expected_cols if col not in df.columns]
+
     if missing_cols:
-        raise ValueError(f"В датафрейме отсутствуют обязательные колонки: {missing_cols}")
-    return True
+        raise ValidationError(
+            f"[Schema] Ошибка в '{dataset_type}': отсутствуют обязательные колонки -> {missing_cols}. "
+            f"Текущие колонки в файле: {list(df.columns)}"
+        )
+
+    print(f"[Schema] Датасет '{dataset_type}' успешно прошел валидацию. Строк: {len(df)}")
+    return df
