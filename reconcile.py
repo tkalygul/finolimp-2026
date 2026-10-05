@@ -1,12 +1,14 @@
 import argparse
 import os
 import random
+import subprocess
 import sys
 import numpy as np
 import pandas as pd
 
-# Импортируем нашу схему валидации
+# Импортируем нашу схему валидации и загрузчик реестра (P3)
 from src.schema import validate, ValidationError
+from src.load_registry import InputFileError, load_registry, write_outputs
 
 
 def fix_random_seed(seed: int = 42):
@@ -50,13 +52,12 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     os.makedirs("interim", exist_ok=True)
 
-    # Пути к файлам (поддержка поиска по маске / имени)
+    # Пути к файлам, реестр ищет сам загрузчик (registry*.csv)
     acts_path = os.path.join(args.data, "acts.csv")
     etm_path = os.path.join(args.data, "etm.csv")
-    registry_path = os.path.join(args.data, "registry.csv")
 
     # Проверка наличия файлов
-    for path in [acts_path, etm_path, registry_path]:
+    for path in [acts_path, etm_path]:
         if not os.path.exists(path):
             print(f"[Ошибка] Не найден обязательный файл: {path}")
             sys.exit(1)
@@ -65,14 +66,21 @@ def main():
         print("\n--- ШАГ 1: Загрузка и первичная валидация данных (P2, P3) ---")
         acts_df = pd.read_csv(acts_path)
         etm_df = pd.read_csv(etm_path)
-        registry_df = pd.read_csv(registry_path)
 
         # Прогоняем через наш валидатор из schema.py
         validate(acts_df, dataset_type="acts")
         validate(etm_df, dataset_type="etm")
-        validate(registry_df, dataset_type="registry")
 
-        print("[Шаг 1] Загрузка и валидация успешно завершены.")
+        # Очистка актов 1С и ETM (P2), результат в interim/clean
+        clean_dir = os.path.join("interim", "clean")
+        cleaning_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cleaning.py")
+        subprocess.run([sys.executable, cleaning_script, args.data, clean_dir], check=True)
+
+        # Загрузка и разбор реестра (P3), результат в interim
+        registry_result = load_registry(args.data)
+        write_outputs(registry_result, "interim")
+
+        print("[Шаг 1] Загрузка, валидация и очистка успешно завершены.")
 
         # --- ШАГ 2: Сопоставление и баланс (P4) ---
         print("\n--- ШАГ 2: Сопоставление транзакций и сведение баланса (P4) ---")
@@ -103,7 +111,7 @@ def main():
             
         print(f"[Шаг 5] Отчет успешно сохранен в: {output_report_path}")
 
-    except ValidationError as ve:
+    except (ValidationError, InputFileError) as ve:
         print(f"\n[КРИТИЧЕСКАЯ ОШИБКА ВАЛИДАЦИИ]: {ve}")
         sys.exit(1)
     except Exception as e:
