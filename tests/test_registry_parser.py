@@ -68,8 +68,21 @@ def test_subagent_key_matches_p2_norm_name():
         "ОсОО «Ак-Жол Логистик»", 'ОсОО "Ыйык Тур"', "Ыйык Тур  ", "ИП Турсунов Т. А.",
         "Турсунов Т.А.", "SkyWayTravel", "Сёмин Пётр", "ЗАО «Кыргыз Телеком Сервис»",
         "Ипак Жолу", "Ак-Куу Авиа", "ООО Ромашка", "",
+        None, float("nan"), pd.NA,
     ]
     assert [subagent_key(n) for n in names] == [norm_name(n) for n in names]
+
+
+@pytest.mark.parametrize("empty", [None, float("nan"), pd.NA, ""])
+def test_missing_values(empty):
+    """None, NaN и pd.NA ведут себя как пустая ячейка: ни выдуманных пассажиров, ни неверной причины."""
+    assert normalize_pax(empty) == []
+    with pytest.raises(ParseError) as t:
+        tickets10(empty)
+    assert t.value.reason == "no_tickets"
+    with pytest.raises(ParseError) as p:
+        parse_pay(empty)
+    assert p.value.reason == "no_amount"
 
 
 @pytest.mark.parametrize("cell, expected", [

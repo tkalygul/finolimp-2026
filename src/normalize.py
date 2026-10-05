@@ -5,7 +5,14 @@
 import re
 from dataclasses import dataclass
 
+import pandas as pd
+
 CURRENCIES = frozenset({"KGS", "USD", "EUR", "RUB", "KZT"})
+
+
+def _missing(cell) -> bool:
+    """Пустое значение: None, NaN, pd.NA, NaT (как проверяет pd.isna в cleaning.py)."""
+    return bool(pd.isna(cell))
 
 
 class ParseError(ValueError):
@@ -28,7 +35,7 @@ _QUOTES = re.compile(r"[«»\"“”'`]")
 
 def subagent_key(name) -> str:
     """Приводит название субагента к единому ключу, как norm_name в cleaning.py."""
-    if name is None:
+    if _missing(name):
         return ""
     s = str(name).lower().replace("ё", "е")
     s = _QUOTES.sub("", s)
@@ -43,7 +50,7 @@ _TICKET = re.compile(r"\d{3}-\d{10}|\d{13}|\d{10}")
 
 def tickets10(cell) -> list:
     """Берёт последние 10 цифр каждого билета из ячейки."""
-    if cell is None:
+    if _missing(cell):
         raise ParseError("no_tickets")
     parts = [p for p in _TICKET_SEP.split(str(cell)) if p]
     if not parts:
@@ -134,7 +141,7 @@ def _currency(code) -> str:
 
 def parse_pay(cell) -> Pay:
     """Разбирает ячейку суммы: основная сумма, сбор (sf) и штраф."""
-    raw = "" if cell is None else str(cell)
+    raw = "" if _missing(cell) else str(cell)
     low = _SPACES.sub(" ", raw).lower().strip()
     if not low:
         raise ParseError("no_amount")
@@ -186,7 +193,7 @@ def parse_pay(cell) -> Pay:
 
 def normalize_pax(cell) -> list:
     """Приводит список пассажиров к верхнему регистру без лишних пробелов."""
-    if cell is None:
+    if _missing(cell):
         return []
     names = re.split(r"[,;\n]+", str(cell))
     return [re.sub(r"\s+", " ", n).strip().upper() for n in names if n.strip()]
