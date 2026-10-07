@@ -10,6 +10,7 @@ import pandas as pd
 from src.schema import validate, ValidationError
 from src.load_registry import InputFileError, load_registry, write_outputs
 from src.classify_errors import format_report as format_p5_report, run_p5
+from src.report import build_report
 
 
 def fix_random_seed(seed: int = 42):
@@ -101,16 +102,9 @@ def main():
 
         # --- ШАГ 5: Генерация итогового Excel-отчета (P3 / P2) ---
         print("\n--- ШАГ 5: Генерация отчета для бухгалтера (P3) ---")
-        
-        # Пример создания базового отчета, чтобы пайплайн не был пустым
+        # Отчёт собирается из interim: реестр (P3), ошибки и аномалии (P5), мост баланса (P4)
         output_report_path = os.path.join(args.out, "reconciliation_report.xlsx")
-        with pd.ExcelWriter(output_report_path, engine='openpyxl') as writer:
-            summary_placeholder = pd.DataFrame({
-                "Status": ["Пайплайн успешно выполнен", "Все шаги пройдены"],
-                "Note": ["Готово к проверке жюри", "Баланс проверен автотестами"]
-            })
-            summary_placeholder.to_excel(writer, sheet_name="Сводка", index=False)
-            
+        build_report("interim", output_report_path)
         print(f"[Шаг 5] Отчет успешно сохранен в: {output_report_path}")
 
     except (ValidationError, InputFileError) as ve:
