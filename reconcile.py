@@ -10,6 +10,7 @@ import pandas as pd
 from src.schema import validate, ValidationError
 from src.load_registry import InputFileError, load_registry, write_outputs
 from src.classify_errors import format_report as format_p5_report, run_p5
+from p4_reconcile import format_report as format_p4_report, run_p4
 
 
 def fix_random_seed(seed: int = 42):
@@ -85,8 +86,9 @@ def main():
 
         # --- ШАГ 2: Сопоставление и баланс (P4) ---
         print("\n--- ШАГ 2: Сопоставление транзакций и сведение баланса (P4) ---")
-        # TODO: Здесь P4 подключает логику матчинга и построения моста баланса
-        print("[Шаг 2] (Заглушка) Сопоставление выполнено.")
+        p4_result = run_p4(clean_dir, os.path.join("interim", "registry.parquet"), os.path.join("interim", "p4"))
+        print(format_p4_report(p4_result))
+        print("[Шаг 2] Сопоставление выполнено, результаты в interim/p4.")
 
         # --- ШАГ 3: Классификация расхождений и аномалии (P5) ---
         print("\n--- ШАГ 3: Классификация расхождений и поиск аномалий (P5) ---")
