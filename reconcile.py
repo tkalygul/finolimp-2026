@@ -9,6 +9,7 @@ import pandas as pd
 # Импортируем нашу схему валидации и загрузчик реестра (P3)
 from src.schema import validate, ValidationError
 from src.load_registry import InputFileError, load_registry, write_outputs
+from src.classify_errors import format_report as format_p5_report, run_p5
 
 
 def fix_random_seed(seed: int = 42):
@@ -89,8 +90,9 @@ def main():
 
         # --- ШАГ 3: Классификация расхождений и аномалии (P5) ---
         print("\n--- ШАГ 3: Классификация расхождений и поиск аномалий (P5) ---")
-        # TODO: Здесь P5 размечает типы расхождений и ищет аномалии
-        print("[Шаг 3] (Заглушка) Классификация выполнена.")
+        p5_result = run_p5(clean_dir, os.path.join("interim", "registry.parquet"), os.path.join("interim", "p5"))
+        print(format_p5_report(p5_result))
+        print("[Шаг 3] Классификация выполнена, результаты в interim/p5.")
 
         # --- ШАГ 4: ML-модель предсказания рисков (P6) ---
         print("\n--- ШАГ 4: Запуск модели оценки рисков (P6) ---")

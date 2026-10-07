@@ -61,16 +61,10 @@ def test_subagent_key(name, key):
     assert subagent_key(name) == key
 
 
-def test_subagent_key_matches_p2_norm_name():
-    """Ключ должен совпадать с norm_name из cleaning.py, иначе таблицы не склеятся."""
-    from cleaning import norm_name
-    names = [
-        "ОсОО «Ак-Жол Логистик»", 'ОсОО "Ыйык Тур"', "Ыйык Тур  ", "ИП Турсунов Т. А.",
-        "Турсунов Т.А.", "SkyWayTravel", "Сёмин Пётр", "ЗАО «Кыргыз Телеком Сервис»",
-        "Ипак Жолу", "Ак-Куу Авиа", "ООО Ромашка", "",
-        None, float("nan"), pd.NA,
-    ]
-    assert [subagent_key(n) for n in names] == [norm_name(n) for n in names]
+def test_p2_uses_same_subagent_key():
+    """cleaning.py (P2) должен строить ключ той же функцией, иначе таблицы не склеятся."""
+    import cleaning
+    assert cleaning.subagent_key is subagent_key
 
 
 @pytest.mark.parametrize("empty", [None, float("nan"), pd.NA, ""])
