@@ -219,3 +219,9 @@ __marimo__/
 
 # FinOlimp 2026 Project Folders
 data_2_final/
+
+# Промежуточные файлы и отчёты пайплайна
+interim/*
+!interim/.gitkeep
+report/*
+!report/.gitkeep

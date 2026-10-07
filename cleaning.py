@@ -11,23 +11,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Импортируем единую функцию нормализации ключа субагента из общего модуля src/normalize.py
+from src.normalize import subagent_key
+
 # ================================================================
 # ЧАСТЬ 1. ОБЩИЕ УТИЛИТЫ (помощники для текста и чисел)
 # ================================================================
-
-# Шаблон для поиска юридических форм (чтобы приводить названия к единому виду)
-_LEGAL = re.compile(r"\b(осоо|ооо|ип|зао|оао)\b", re.I)
-
-
-def norm_name(s) -> str:
-    """Нормализует название компании/субагента для точного сопоставления."""
-    if pd.isna(s):
-        return ""
-    s = str(s).lower().replace("ё", "е")
-    s = re.sub(r"[«»\"“”'`]", "", s)
-    s = _LEGAL.sub(" ", s)
-    return re.sub(r"[\s]+", "", s).strip()
-
 
 def _num(series) -> pd.Series:
     """Превращает строковые суммы с пробелами и запятыми в нормальные числа (float)."""
@@ -90,7 +79,8 @@ def load_acts(path):
         
     a["act_status"] = a["act_status"].fillna("").str.strip().str.lower()
     a["subagent"] = a["folder"].str.strip()
-    a["subagent_key"] = a["subagent"].map(norm_name)
+    # Используем subagent_key из normalize.py вместо старой norm_name
+    a["subagent_key"] = a["subagent"].map(subagent_key)
     a["period"] = a["period_start"].dt.to_period("M").astype(str)
 
     # Логика приоритетов: если есть переизданный акт, черновик отбрасываем
@@ -186,10 +176,11 @@ def load_etm(path, subagents=None):
     e["kind"] = e["kind"].str.strip().str.lower()
     e["kind_en"] = e["kind"].map(_KIND)
     e["creator_en"] = e["creator"].map({"etm-bot": "bot", "субагент": "subagent"})
-    e["agent_key"] = e["agent"].map(norm_name)
+    # Используем subagent_key из normalize.py здесь тоже
+    e["agent_key"] = e["agent"].map(subagent_key)
 
     if subagents is not None:
-        key2name = {norm_name(s): s for s in subagents}
+        key2name = {subagent_key(s): s for s in subagents}
         e["subagent"] = e["agent_key"].map(key2name)
         log.append(("etm: строк без соответствия субагенту 1С", int(e["subagent"].isna().sum())))
     else:
