@@ -218,9 +218,11 @@ def load_etm(path, subagents=None):
     e["is_foreign"] = e.currency != "KGS"
     log.append(("etm: дубликаты txn_id", int(e.txn_id.duplicated().sum())))
 
-    # Проверяем цепочку остатков на счетах ETM
-    e = e.sort_values(["agreement_id", "date", "txn_id"]).reset_index(drop=True)
-    e["prev_balance"] = e.groupby("agreement_id")["balance_after"].shift()
+    # Проверяем цепочку остатков на счетах ETM.
+    # Депозит у субагента один: при нескольких договорах balance_after идёт сквозной
+    # цепочкой по всем договорам, поэтому цепочку строим по субагенту, а не по договору.
+    e = e.sort_values(["agent_key", "date", "txn_id"]).reset_index(drop=True)
+    e["prev_balance"] = e.groupby("agent_key")["balance_after"].shift()
     e["chain_gap"] = (e["prev_balance"] + e["amount_kgs"] - e["balance_after"]).round(2)
     e["chain_break"] = e["chain_gap"].abs().gt(0.01) & e["prev_balance"].notna()
     
@@ -229,11 +231,10 @@ def load_etm(path, subagents=None):
 
 
 def etm_month_end_balance(etm) -> pd.DataFrame:
-    """Считает конечный баланс ETM на конец каждого месяца."""
-    last = (etm.sort_values(["agreement_id", "date", "txn_id"])
-            .groupby(["subagent", "agreement_id", "period"]).tail(1))
-    last = last[["subagent", "agreement_id", "period", "balance_after"]]
-    return last.groupby(["subagent", "period"]).balance_after.sum().rename("etm_balance_end").reset_index()
+    """Считает конечный баланс ETM на конец каждого месяца (депозит один на субагента)."""
+    last = (etm.sort_values(["agent_key", "date", "txn_id"])
+            .groupby(["subagent", "period"]).tail(1))
+    return last[["subagent", "period", "balance_after"]].rename(columns={"balance_after": "etm_balance_end"})
 
 
 # ================================================================

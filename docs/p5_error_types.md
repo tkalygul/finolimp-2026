@@ -55,9 +55,10 @@
 * **P3 (Excel-отчёт):** `p5_summary_subagent.csv`, `p5_summary_type.csv`, `p5_anomalies.csv`;
   колонки `error_owner_ru`, `error_type_ru`, `reason` уже на русском.
 * **P6 (модель):** `p5_ticket_classified.csv` и `p5_payments.csv` — `is_error` (0/1) и `error_owner` как метки.
-* **P4:** в `p4_operation_matches.csv` строка сервисного сбора 1С и строка продажи сливаются с одной строкой
-  ETM отдельно, поэтому около половины `amount_difference` — артефакт слияния. P5 считает свой леджер
-  и от этого не зависит, но в балансе P4 это стоит поправить.
+* **P4:** P5 считает свой леджер и от `p4_operation_matches.csv` не зависит. Число билетов, где 1С ≠ ETM,
+  у P4 и P5 совпадает (1 037).
+* **P2:** цепочка остатков ETM строится по субагенту (депозит один на все договоры), поэтому
+  `etm_balance_chain_break` — только настоящие разрывы (6 на `data_2_final`).
 
 ## Результат на `data_2_final`
 
