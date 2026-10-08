@@ -3,7 +3,7 @@
 Листы:
     Сводка, По субагентам, Ошибки по типам, Расхождения по билетам, Оплаты с ошибкой, Аномалии,
     Сотрудники реестра, Справочник ошибок  — результаты P5 (interim/p5), если P5 запускали
-    Мост баланса, Сверка P4 по субагентам  — результаты P4 (interim/p4), только исправленной версии
+    Мост баланса, Сверка по субагентам  — результаты сверки (interim/reconciliation), только исправленной версии
     Сводка реестра, Проблемные строки, Корпоративные, Дубли реестра  — разбор реестра (P3), всегда
 
 Как запустить:
@@ -19,6 +19,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from src.classify_errors import ISSUE_RU, OWNER_RU
+from src.accountant_actions import run_accountant_actions, SUMMARY_RU, DETAIL_RU
+from src.ml_risk import report_frames as ml_report_frames
 
 # Результаты P5 в папке interim. P5 пишет их все вместе, поэтому нужны либо все, либо ни одного.
 P5_FILES = {
@@ -31,14 +33,14 @@ P5_FILES = {
     "error_types": "p5/p5_error_types.csv",
 }
 
-# Результаты P4 и колонка, которая есть только в исправленной версии P4.
-# Старая версия P4 (слияние «многие ко многим», без моста) в отчёт не попадает.
-P4_FILES = {
-    "bridge": ("p4/p4_balance_bridge.csv", "unexplained"),
-    "summary": ("p4/p4_subagent_summary.csv", "unexplained_total"),
+# Результаты сверки и колонка, которая есть только в исправленной версии сверки.
+# Старая версия сверки (слияние «многие ко многим», без моста) в отчёт не попадает.
+RECONCILIATION_FILES = {
+    "bridge": ("reconciliation/balance_bridge.csv", "unexplained"),
+    "summary": ("reconciliation/subagent_summary.csv", "unexplained_total"),
 }
 
-# Причины в мосте баланса: колонка P4 -> заголовок
+# Причины в мосте баланса: колонка сверки -> заголовок
 BRIDGE_CAUSES = {
     "ops_amount_difference": "Сумма отличается, сом",
     "ops_only_1c": "Операция только в 1С, сом",
@@ -47,13 +49,27 @@ BRIDGE_CAUSES = {
     "payments_only_1c": "Оплата только в 1С, сом",
     "payments_only_etm": "Оплата только в ETM, сом",
     "payments_period_mismatch": "Оплата в другом месяце, сом",
+    "payments_amount_difference": "Разница сумм оплаты, сом",
+    "ops_ambiguous": "Операции: причина требует выяснения, сом",
+    "payments_ambiguous": "Оплаты: причина требует выяснения, сом",
+    "ops_unclassified": "Нераспознанные операции, сом",
 }
-# Сошедшиеся операции, войды и оплаты дают только копейки округления
+# Подписанные остатки групп: войд между месяцами может давать полный тариф.
 BRIDGE_ROUNDING = ["ops_matched", "ops_voided", "payments_matched"]
 BRIDGE_NOTE = ("Разница = сальдо 1С + баланс ETM (в ETM долг субагента со знаком минус). "
-               "Разница на начало + причины + округления = разница на конец. «Не объяснено» должно быть 0.")
+               "Разница на начало + вклады операций + «Не объяснено» = разница на конец. "
+               "Пустое сальдо означает неизвестный баланс. Числовое сведение не подтверждает причину ошибки.")
 
 ANOMALY_RU = {
+    "etm_double_debit_suspected":"Подозрение на повторное списание",
+    "etm_double_credit_suspected":"Подозрение на повторное зачисление",
+    "void_without_credit":"Войд без возврата денег",
+    "void_partial_credit":"Войд с частичным возвратом",
+    "void_pending_credit":"Войд ожидает возврата: проверить срок",
+    "void_delayed_credit":"Выкуп погашен с задержкой",
+    "void_without_purchase":"Войд без исходного выкупа",
+    "void_excess_credit":"Возврат по войду превышает выкуп",
+    "employee_error_concentration":"Концентрация ошибок по сотруднику",
     "etm_duplicate_op": "Бот повторил операцию (те же билеты, та же сумма)",
     "etm_double_credit": "Оплата зачислена в ETM дважды",
     "etm_wrong_sign": "Операция в ETM с неверным знаком",
@@ -176,10 +192,10 @@ def read_p5_outputs(interim_dir) -> dict:
     return {k: pd.read_csv(p, dtype=dtypes, encoding="utf-8-sig", low_memory=False) for k, p in paths.items()}
 
 
-def read_p4_outputs(interim_dir) -> dict:
-    """Читает результаты P4, но только исправленной версии (с мостом баланса), иначе пустой словарь."""
+def read_reconciliation_outputs(interim_dir) -> dict:
+    """Читает результаты сверки, но только исправленной версии (с мостом баланса), иначе пустой словарь."""
     out = {}
-    for key, (file, required) in P4_FILES.items():
+    for key, (file, required) in RECONCILIATION_FILES.items():
         path = Path(interim_dir) / file
         if not path.exists():
             return {}
@@ -192,7 +208,7 @@ def read_p4_outputs(interim_dir) -> dict:
 
 def subagent_names(interim_dir) -> dict:
     """Ключ субагента -> название: из актов 1С, а если там нет — из ETM."""
-    ready = Path(interim_dir) / "clean" / "p4_ready"
+    ready = Path(interim_dir) / "clean" / "reconciliation_ready"
     names = {}
     for file, key, name in (("etm_clean.csv", "agent_key", "agent"),
                             ("acts_clean.csv", "subagent_key", "subagent")):
@@ -279,7 +295,7 @@ def duplicates_table(registry) -> pd.DataFrame:
 # ЧАСТЬ 3. ТАБЛИЦЫ P5: ОШИБКИ И АНОМАЛИИ
 # ================================================================
 
-def overview_blocks(p5, p4, names) -> list:
+def overview_blocks(p5, reconciliation, names) -> list:
     """Таблицы листа «Сводка»: показатели, ошибки по виновникам, топ субагентов, частые сбои."""
     t, p, sub, emp = p5["tickets"], p5["payments"], p5["subagent"], p5["employee"]
     metrics = [
@@ -291,12 +307,13 @@ def overview_blocks(p5, p4, names) -> list:
         ("Субагентов с частыми сбоями", int(sub["frequent_failures"].sum())),
         ("Сотрудников реестра с частыми сбоями", int(emp["frequent_failures"].sum())),
     ]
-    if p4:
-        b = p4["bridge"]
+    if reconciliation:
+        b = reconciliation["bridge"]
         metrics += [
             ("Субагенто-месяцев в мосте баланса", len(b)),
             ("из них с разницей 1С и ETM на конец месяца", int(b["closing_difference"].abs().gt(1).sum())),
-            ("из них с необъяснённой разницей", int(b["unexplained"].abs().gt(1).sum())),
+            ("из них с необъяснённой разницей", int(b["unexplained"].abs().gt(0.02).sum())),
+            ("из них разница неизвестна", int(b["unexplained"].isna().sum())),
         ]
     blocks = [("Показатели", pd.DataFrame(metrics, columns=["Показатель", "Количество"]))]
 
@@ -383,6 +400,10 @@ def ticket_errors_table(tickets, names) -> pd.DataFrame:
         "Кто вносил в реестр": t["created_by"],
         "Код ошибки": t["error_type"],
     })
+    if "match_id" in t:
+        df=df.rename(columns={"Виновник":"Предполагаемый источник"})
+        df["ID группы сопоставления"]=t.match_id
+        df["Альтернативные причины"]=t.alternative_causes
     return df.sort_values(["Субагент", "Месяц", "Билет"]).reset_index(drop=True)
 
 
@@ -405,6 +426,11 @@ def payment_errors_table(payments, names) -> pd.DataFrame:
         "Сумма под риском, сом": p["amount_at_stake"].round(2),
         "Код ошибки": p["error_type"],
     })
+    if "match_id" in p:
+        df=df.rename(columns={"Виновник":"Предполагаемый источник"})
+        df["ID группы сопоставления"]=p.match_id
+        df["Все транзакции ETM"]=p.txn_ids
+        df["Альтернативные причины"]=p.alternative_causes
     return df.sort_values(["Субагент", "Месяц"]).reset_index(drop=True)
 
 
@@ -412,7 +438,7 @@ def anomalies_table(anomalies, names) -> pd.DataFrame:
     """Аномалии: сначала высокая важность."""
     a = anomalies.assign(_order=anomalies["severity"].map(LEVEL_ORDER))
     a = a.sort_values(["_order", "anomaly_type", "subagent_id", "period"])
-    return pd.DataFrame({
+    table=pd.DataFrame({
         "Важность": a["severity"].map(LEVEL_RU),
         "Что найдено": a["anomaly_type"].map(ANOMALY_RU).fillna(a["anomaly_type"]),
         "Виновник": a["error_owner"].map(OWNER_RU),
@@ -422,17 +448,30 @@ def anomalies_table(anomalies, names) -> pd.DataFrame:
         "Сумма, сом": a["amount_kgs"].round(2),
         "Подробности": a["detail"],
         "Код": a["anomaly_type"],
-    }).reset_index(drop=True)
+    })
+    if "anomaly_id" in a:
+        table=table.rename(columns={"Виновник":"Ответственный требует выяснения","Сумма, сом":"Потенциальная сумма, сом"})
+        for field,title in [("anomaly_id","ID аномалии"),("status","Статус сигнала"),("confidence","Уверенность правила"),
+                            ("match_ids","Группы сопоставления"),("source_refs","Исходные строки"),
+                            ("transaction_ids","Все транзакции ETM"),("overlap_key","Связь с другими сигналами"),
+                            ("amount_semantics","Как понимать сумму")]: table[title]=a[field]
+    return table.reset_index(drop=True)
 
 
 def employee_table(emp) -> pd.DataFrame:
-    return pd.DataFrame({
+    table=pd.DataFrame({
         "Сотрудник": emp["created_by"],
         "Строк в реестре": emp["rows"].astype(int),
         "Ошибок агента": emp["agent_errors"].astype(int),
         "Доля ошибок, %": emp["error_rate"],
         "Частые сбои": emp["frequent_failures"].map(YES_NO),
-    }).reset_index(drop=True)
+    })
+    if "suspected_agent_errors" in emp:
+        table=table.rename(columns={"Ошибок агента":"Наблюдаемых ошибок данных","Строк в реестре":"Исходных строк реестра"})
+        for field,title in [("suspected_agent_errors","Гипотез ошибок агента"),("review_rows","Строк для выяснения"),
+                            ("shared_review_rows","Строк с несколькими сотрудниками"),("wilson_lower","Нижняя граница доли ошибок, %"),
+                            ("reference_rate","Общая доля ошибок, %"),("enough_data","Достаточно данных")]: table[title]=emp[field]
+    return table.reset_index(drop=True)
 
 
 def error_catalog_table(types) -> pd.DataFrame:
@@ -444,7 +483,7 @@ def error_catalog_table(types) -> pd.DataFrame:
 
 
 # ================================================================
-# ЧАСТЬ 4. ТАБЛИЦЫ P4: МОСТ БАЛАНСА
+# ЧАСТЬ 4. ТАБЛИЦЫ сверки: МОСТ БАЛАНСА
 # ================================================================
 
 def bridge_table(bridge, names) -> pd.DataFrame:
@@ -460,15 +499,22 @@ def bridge_table(bridge, names) -> pd.DataFrame:
     })
     for col, title in BRIDGE_CAUSES.items():
         df[title] = b[col]
-    df["Округления (до 1 сом), сом"] = b[BRIDGE_ROUNDING].sum(axis=1).round(2)
+    df["Остатки сопоставленных операций, сом"] = b[BRIDGE_ROUNDING].sum(axis=1).round(2)
     df["Разница на конец, сом"] = b["closing_difference"]
     df["Не объяснено, сом"] = b["unexplained"]
     df["Сальдо 1С на конец, сом"] = b["saldo_end"]
     df["Баланс ETM на конец, сом"] = b["etm_balance_end"]
+    if "bridge_status" in b:
+        df["Статус моста"] = b.bridge_status.replace({"reconciled":"Сведен",
+            "missing_act":"Нет акта 1С", "unknown_etm_balance":"Баланс ETM неизвестен",
+            "unexplained_residual":"Есть необъясненный остаток"})
+        df["Разрыв переноса сальдо 1С, сом"] = b.act_carryover_gap
+        df["Разрыв учета компонентов, сом"] = b.component_gap
+        df["Групп с невыясненной причиной"] = b.cause_review_groups
     return df.sort_values(["Субагент", "Месяц"]).reset_index(drop=True)
 
 
-def p4_summary_table(summary, names) -> pd.DataFrame:
+def reconciliation_summary_table(summary, names) -> pd.DataFrame:
     """Сверка 1С и ETM по субагентам: сколько сошлось, чего не хватает, сколько не объяснено."""
     s = summary
     df = pd.DataFrame({
@@ -490,6 +536,10 @@ def p4_summary_table(summary, names) -> pd.DataFrame:
         "Не объяснено, сом": s["unexplained_total"],
         "Доля сошедшихся, %": s["matched_share"],
     })
+    if "unknown_months" in s:
+        df["Месяцев с неизвестной разницей"] = s.unknown_months
+        df["Не объяснено по модулю, сом"] = s.unexplained_absolute_total
+        df["Групп для проверки"] = s.unresolved_groups
     return df.sort_values("Субагент").reset_index(drop=True)
 
 
@@ -504,7 +554,8 @@ def write_sheet(writer, name, df, startrow=0, table=True, highlight=None):
     """
     df.to_excel(writer, sheet_name=name, index=False, startrow=startrow)
     ws = writer.sheets[name]
-    for cell in ws[startrow + 1]:
+    ncols=len(df.columns)
+    for cell in next(ws.iter_rows(min_row=startrow+1,max_row=startrow+1,min_col=1,max_col=ncols)):
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
         cell.alignment = Alignment(wrap_text=True, vertical="center")
@@ -513,17 +564,17 @@ def write_sheet(writer, name, df, startrow=0, table=True, highlight=None):
         values = [len(str(title))] + [len(str(v)) for v in df[title] if v is not None]
         width = min(max(values) + 2, MAX_COLUMN_WIDTH)
         ws.column_dimensions[letter].width = max(ws.column_dimensions[letter].width or 0, width)
-        for cell in ws[letter][startrow + 1:]:
-            cell.alignment = Alignment(wrap_text=True, vertical="top")
-            if str(title).endswith(MONEY_SUFFIX):
-                cell.number_format = "#,##0.00"
-            elif str(title).endswith(PERCENT_SUFFIX):
-                cell.number_format = "0.00%"
-    if highlight is not None:
-        for i, flag in enumerate(highlight):
-            if flag:
-                for cell in ws[startrow + 2 + i][:len(df.columns)]:
-                    cell.fill = WARN_FILL
+    alignment=Alignment(wrap_text=True,vertical="top")
+    formats=["#,##0.00" if str(title).endswith(MONEY_SUFFIX) else
+             ("0.00%" if str(title).endswith(PERCENT_SUFFIX) else None) for title in df.columns]
+    # Explicit bounds avoid repeatedly scanning every cell to infer worksheet dimensions.
+    if len(df):
+        for i,row in enumerate(ws.iter_rows(min_row=startrow+2,max_row=startrow+1+len(df),min_col=1,max_col=ncols)):
+            marked=highlight is not None and highlight[i]
+            for j,cell in enumerate(row):
+                cell.alignment=alignment
+                if formats[j]: cell.number_format=formats[j]
+                if marked: cell.fill=WARN_FILL
     if table:
         ws.freeze_panes = ws.cell(row=startrow + 2, column=1)
         ws.auto_filter.ref = f"A{startrow + 1}:{get_column_letter(len(df.columns))}{startrow + 1 + len(df)}"
@@ -540,18 +591,28 @@ def write_blocks(writer, name, blocks):
 
 
 def build_report(interim_dir, out_path) -> Path:
-    """Собирает Excel-отчёт: разбор реестра, а также листы P5 и P4, если они уже посчитаны."""
+    """Собирает Excel-отчёт: разбор реестра, а также листы P5 и сверки, если они уже посчитаны."""
     data = read_registry_outputs(interim_dir)
     metrics_df, reasons_df = summary_tables(data["text"])
     p5 = read_p5_outputs(interim_dir)
-    p4 = read_p4_outputs(interim_dir)
+    reconciliation = read_reconciliation_outputs(interim_dir)
     names = subagent_names(interim_dir)
+    actions = run_accountant_actions(interim_dir)
 
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        for sheet,frame in ml_report_frames(interim_dir).items():
+            write_sheet(writer,sheet,frame)
+        if actions is not None:
+            summary, details = actions
+            summary=summary.copy(); details=details.copy()
+            summary['subagent_id']=_names(summary.subagent_id,names)
+            details['subagent_id']=_names(details.subagent_id,names)
+            write_sheet(writer,'Действия бухгалтера',summary.rename(columns=SUMMARY_RU))
+            write_sheet(writer,'Детали действий',details.rename(columns=DETAIL_RU))
         if p5:
-            write_blocks(writer, "Сводка", overview_blocks(p5, p4, names))
+            write_blocks(writer, "Сводка", overview_blocks(p5, reconciliation, names))
             sub = p5["subagent"]
             write_sheet(writer, "По субагентам", subagent_table(sub, names),
                         highlight=sub["frequent_failures"].tolist())
@@ -559,12 +620,12 @@ def build_report(interim_dir, out_path) -> Path:
             write_sheet(writer, "Расхождения по билетам", ticket_errors_table(p5["tickets"], names))
             write_sheet(writer, "Оплаты с ошибкой", payment_errors_table(p5["payments"], names))
             write_sheet(writer, "Аномалии", anomalies_table(p5["anomalies"], names))
-        if p4:
-            bridge = bridge_table(p4["bridge"], names)
+        if reconciliation:
+            bridge = bridge_table(reconciliation["bridge"], names)
             write_sheet(writer, "Мост баланса", bridge, startrow=2,
-                        highlight=bridge["Не объяснено, сом"].abs().gt(1).tolist())
+                        highlight=(bridge["Не объяснено, сом"].abs().gt(0.02) | bridge["Не объяснено, сом"].isna()).tolist())
             writer.sheets["Мост баланса"]["A1"] = BRIDGE_NOTE
-            write_sheet(writer, "Сверка P4 по субагентам", p4_summary_table(p4["summary"], names))
+            write_sheet(writer, "Сверка по субагентам", reconciliation_summary_table(reconciliation["summary"], names))
         if p5:
             emp = p5["employee"]
             write_sheet(writer, "Сотрудники реестра", employee_table(emp),
@@ -577,6 +638,30 @@ def build_report(interim_dir, out_path) -> Path:
         write_sheet(writer, "Дубли реестра", duplicates_table(data["registry"]))
         if p5:
             write_sheet(writer, "Справочник ошибок", error_catalog_table(p5["error_types"]))
+        matching_path = Path(interim_dir) / "reconciliation" / "operation_matches.csv"
+        if matching_path.exists():
+            matching = pd.read_csv(matching_path, dtype={"ticket10": str}, encoding="utf-8-sig")
+            matching["subagent_id"] = _names(matching["subagent_id"], names)
+            matching["match_status"] = matching["match_status"].replace({"matched": "Сопоставлено",
+                "amount_difference": "Разница сумм", "period_mismatch": "Разные месяцы",
+                "voided": "Выкуп отменен", "only_1c": "Только 1С", "only_etm": "Только ETM",
+                "only_registry": "Только реестр", "ambiguous": "Требует выяснения"})
+            matching = matching.rename(columns={"subagent_id": "Субагент", "match_id": "ID группы",
+                "ticket10": "Билет", "op_type": "Операция", "match_status": "Статус сопоставления",
+                "amount_1c": "Сумма 1С, сом", "amount_etm": "Сумма ETM, сом",
+                "amount_registry": "Сумма реестра, сом", "review_reason": "Причина проверки"})
+            write_sheet(writer, "Сопоставление операций", matching)
+        for filename, sheet in [("p5_group_classification.csv","Классификация этапа 4"),
+                                ("p5_balance_review.csv","Балансовые случаи этапа 4")]:
+            source = Path(interim_dir)/"p5"/filename
+            if source.exists():
+                frame=pd.read_csv(source,encoding="utf-8-sig",dtype={"ticket10":str},low_memory=False)
+                frame=frame.rename(columns={"match_id":"ID группы сопоставления","case_id":"ID случая",
+                    "error_owner_ru":"Предполагаемый источник","reason":"Объяснение",
+                    "confidence":"Уверенность правила","alternative_causes":"Альтернативные причины",
+                    "flags":"Дополнительные признаки","proposed_correction":"Корректировка не определена",
+                    "amount_at_stake":"Сумма под риском, сом","signed_balance_value":"Подписанное значение, сом"})
+                write_sheet(writer,sheet,frame)
     return out
 
 
