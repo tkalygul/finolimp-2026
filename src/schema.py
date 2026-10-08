@@ -9,13 +9,16 @@ class ValidationError(Exception):
 # Эталонные схемы обязательных колонок для каждого файла проекта
 REQUIRED_COLUMNS = {
     "acts": [
-        "date", "doc", "debet", "credit", "saldo_start", "saldo_end"
+        "folder", "period_start", "period_end", "act_status", "date", "doc",
+        "invoice", "ticket_cell", "pax", "debet", "credit", "saldo_start", "saldo_end"
     ],
     "etm": [
-        "date", "txn_id", "amount", "amount_kgs", "balance_after", "agent"
+        "date", "txn_id", "amount", "amount_kgs", "balance_after", "agent",
+        "agreement_id", "kind", "tickets", "currency", "creator", "comment"
     ],
     "registry": [
-        "date", "party", "tickets", "pax", "pnr"
+        "date", "employee", "kind", "party", "tickets", "pax", "pnr", "airline",
+        "route", "pay_cell", "rate_usd", "rate_eur", "rate_rub", "rate_kzt"
     ]
 }
 
@@ -37,6 +40,8 @@ def validate(df: pd.DataFrame, dataset_type: str = "acts") -> pd.DataFrame:
         raise ValidationError(f"[Schema] Ошибка: Неизвестный тип датасета '{dataset_type}'.")
 
     expected_cols = REQUIRED_COLUMNS[dataset_type]
+    if df.columns.duplicated().any():
+        raise ValidationError(f"[Schema] Повторяющиеся колонки в '{dataset_type}'.")
     missing_cols = [col for col in expected_cols if col not in df.columns]
 
     if missing_cols:

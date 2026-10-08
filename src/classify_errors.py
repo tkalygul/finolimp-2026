@@ -4,8 +4,8 @@
 (бот ETM, агент в реестре или 1С), и ищем дубли, двойные оплаты и частые сбои.
 
 Вход (результаты P2 и P3):
-    interim/clean/p4_ready/acts_clean.csv   — акты 1С
-    interim/clean/p4_ready/etm_clean.csv    — транзакции ETM
+    interim/clean/reconciliation_ready/acts_clean.csv   — акты 1С
+    interim/clean/reconciliation_ready/etm_clean.csv    — транзакции ETM
     interim/registry.parquet                — реестр агентов (одна строка на билет)
 
 Выход (interim/p5):
@@ -108,7 +108,7 @@ FOREIGN_CURRENCIES = {"USD", "EUR", "RUB", "KZT"}
 def load_inputs(clean_dir="interim/clean", registry_path="interim/registry.parquet"):
     """Читает очищенные акты, ETM (P2) и реестр (P3)."""
     clean_dir = Path(clean_dir)
-    ready = clean_dir / "p4_ready"
+    ready = clean_dir / "reconciliation_ready"
     acts = pd.read_csv(ready / "acts_clean.csv", dtype={"tickets10": str, "pay_doc": str},
                        encoding="utf-8-sig")
     etm = pd.read_csv(ready / "etm_clean.csv", dtype={"tickets10": str, "tickets13": str, "pay_doc": str},

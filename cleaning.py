@@ -13,6 +13,8 @@ import pandas as pd
 
 # Импортируем единую функцию нормализации ключа субагента из общего модуля src/normalize.py
 from src.normalize import subagent_key
+from src.quality import read_checked, prepare, key_candidates, split_money
+from src.schema import ValidationError
 
 # ================================================================
 # ЧАСТЬ 1. ОБЩИЕ УТИЛИТЫ (помощники для текста и чисел)
@@ -66,10 +68,10 @@ def tickets10(text) -> list:
 
 def load_acts(path):
     """Загружает акты 1С, очищает суммы, даты и убирает устаревшие черновики."""
-    raw = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-    raw.columns = [c.strip() for c in raw.columns]
+    raw = read_checked(path, "acts")
     log = []
-    a = raw.copy()
+    a, audit, issues = prepare(raw, "acts", ("saldo_start", "saldo_end", "debet", "credit"),
+                               ("period_start", "period_end", "date"), ("debet", "credit"))
     
     # Приводим финансовые поля к числам, а даты — к формату дат
     for c in ("saldo_start", "saldo_end", "debet", "credit"):
@@ -85,13 +87,23 @@ def load_acts(path):
 
     # Логика приоритетов: если есть переизданный акт, черновик отбрасываем
     prio = {"переиздан": 0, "": 1, "черновик": 2}
-    a["_prio"] = a["act_status"].map(prio).fillna(1)
+    a["_prio"] = a["act_status"].map(prio)
     best = a.groupby(["subagent", "period"])["_prio"].transform("min")
     dropped = a[a["_prio"] != best]
     
     log.append(("acts: строк в файле", len(raw)))
     log.append(("acts: отброшено строк устаревших версий (черновик при наличии переиздан)", len(dropped)))
     a = a[a["_prio"] == best].drop(columns="_prio").reset_index(drop=True)
+    audit.loc[audit.source_row.isin(dropped.source_row), "disposition"] = "superseded"
+    # При одинаковом приоритете противоречивые шапки нельзя выбирать через first().
+    header_fields = ["period_start", "period_end", "saldo_start", "saldo_end", "act_status"]
+    conflict = a.groupby(["subagent", "period"])[header_fields].transform("nunique").gt(1).any(axis=1)
+    if conflict.any():
+        extra = raw[raw.source_row.isin(a.loc[conflict, "source_row"])]
+        issues = pd.concat([issues, pd.DataFrame({"source": "acts", "source_row": extra.source_row,
+            "field": "act_status", "raw_value": extra.act_status, "reason": "conflicting_act_headers"})], ignore_index=True)
+        audit.loc[audit.source_row.isin(extra.source_row), "disposition"] = "rejected"
+        a = a[~conflict].copy()
 
     # Определяем тип каждой строки акта (продажа, возврат, оплата и т.д.)
     d = a["doc"].fillna("")
@@ -128,6 +140,9 @@ def load_acts(path):
     log.append(("acts: строк с нераспознанным типом", int((a.line_type == "other").sum())))
     log.append(("acts: продаж/возвратов без билетов", int((~a.is_payment & (a.n_tickets == 0)).sum())))
     
+    log += [("acts: отклонено строк", int(audit.disposition.eq("rejected").sum())),
+            ("acts: принято строк", len(a))]
+    a.attrs.update(audit=audit, issues=issues)
     return a, pd.DataFrame(log, columns=["check", "value"])
 
 
@@ -164,10 +179,9 @@ _KIND = {"выкуп": "purchase", "возврат": "refund", "войд": "void
 
 def load_etm(path, subagents=None):
     """Загружает транзакции ETM, приводит типы, проверяет билеты и знаки сумм."""
-    raw = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
-    raw.columns = [c.strip() for c in raw.columns]
+    raw = read_checked(path, "etm")
     log = [("etm: строк в файле", len(raw))]
-    e = raw.copy()
+    e, audit, issues = prepare(raw, "etm", ("amount", "amount_kgs", "balance_after"), ("date",))
     
     for c in ("amount", "amount_kgs", "balance_after"):
         e[c] = _num(e[c])
@@ -181,8 +195,9 @@ def load_etm(path, subagents=None):
 
     if subagents is not None:
         key2name = {subagent_key(s): s for s in subagents}
-        e["subagent"] = e["agent_key"].map(key2name)
-        log.append(("etm: строк без соответствия субагенту 1С", int(e["subagent"].isna().sum())))
+        mapped = e["agent_key"].map(key2name)
+        log.append(("etm: строк без соответствия субагенту 1С", int(mapped.isna().sum())))
+        e["subagent"] = mapped.fillna(e["agent"])
     else:
         e["subagent"] = e["agent"]
 
@@ -211,7 +226,8 @@ def load_etm(path, subagents=None):
     e["debt_delta"] = -e["amount_kgs"]
     
     # Проверяем правильность знаков суммы (выкуп должен уменьшать баланс, возврат — увеличивать)
-    e["sign_ok"] = np.where(e.kind_en == "purchase", e.amount_kgs < 0, e.amount_kgs > 0)
+    e["sign_ok"] = np.select([e.kind_en.eq("purchase"), e.kind_en.eq("void")],
+                              [e.amount_kgs.lt(0), e.amount_kgs.ge(0)], default=e.amount_kgs.gt(0))
     log.append(("etm: операций с неверным знаком", int((~e.sign_ok).sum())))
 
     e["fx_rate"] = np.where(e.currency != "KGS", (e.amount_kgs / e.amount).round(4), 1.0)
@@ -225,6 +241,9 @@ def load_etm(path, subagents=None):
     e["chain_break"] = e["chain_gap"].abs().gt(0.01) & e["prev_balance"].notna()
     
     log.append(("etm: разрывов цепочки остатков", int(e.chain_break.sum())))
+    log += [("etm: отклонено строк", int(audit.disposition.eq("rejected").sum())),
+            ("etm: принято строк", len(e))]
+    e.attrs.update(audit=audit, issues=issues)
     return e, pd.DataFrame(log, columns=["check", "value"])
 
 
@@ -244,14 +263,28 @@ if __name__ == "__main__":
     src = Path(sys.argv[1] if len(sys.argv) > 1 else "data_2_final")
     out = Path(sys.argv[2] if len(sys.argv) > 2 else "out/clean")
     
-    # Создаем основную папку и подпапку для Р4
+    # Создаем основную папку и подпапку для сверки
     out.mkdir(parents=True, exist_ok=True)
-    p4_folder = out / "p4_ready"
-    p4_folder.mkdir(exist_ok=True)
+    reconciliation_folder = out / "reconciliation_ready"
+    reconciliation_folder.mkdir(exist_ok=True)
 
     print("[INFO] Загрузка и очистка данных...")
     acts, la = load_acts(src / "acts.csv")
     etm, le = load_etm(src / "etm.csv", subagents=acts.subagent.unique())
+    audit = pd.concat([acts.attrs["audit"].assign(source="acts"),
+                       etm.attrs["audit"].assign(source="etm")], ignore_index=True)
+    issues = pd.concat([acts.attrs["issues"], etm.attrs["issues"]], ignore_index=True)
+    audit.to_csv(out / "source_row_audit.csv", index=False, encoding="utf-8-sig")
+    issues.to_csv(out / "data_quality_issues.csv", index=False, encoding="utf-8-sig")
+    names = pd.concat([key_candidates(acts.attrs["audit"], "folder", "acts"),
+                       key_candidates(etm.attrs["audit"], "agent", "etm")], ignore_index=True)
+    names["review_required"] = names.groupby("normalized_key").original_name.transform("nunique").gt(1)
+    names.to_csv(out / "subagent_name_map.csv", index=False, encoding="utf-8-sig")
+    if audit.disposition.eq("rejected").any():
+        raise ValidationError(f"Есть отклоненные финансовые строки. Исправьте данные: {out / 'data_quality_issues.csv'}")
+    # Диагностика уже записана; не переносим большие исходные таблицы в attrs экспортов.
+    acts.attrs.clear()
+    etm.attrs.clear()
     hdr = act_headers(acts)
     cont = act_continuity(hdr)
     be = etm_month_end_balance(etm)
@@ -261,22 +294,22 @@ if __name__ == "__main__":
     def save(df, name):
         df.to_csv(out / name, index=False, encoding="utf-8-sig")
         
-    def save_for_p4(df, name):
-        df.to_csv(p4_folder / name, index=False, encoding="utf-8-sig")
+    def save_for_reconciliation(df, name):
+        df.to_csv(reconciliation_folder / name, index=False, encoding="utf-8-sig")
 
     a = acts.copy(); a["tickets10"] = a.tickets10.map(j)
     e = etm.copy()
     for c in ("tickets13", "tickets10", "tickets13_comment"): e[c] = e[c].map(j)
     
-    # Самые главные файлы для Р4 сохраняем в отдельную подпапку p4_ready
-    save_for_p4(a, "acts_clean.csv")
-    save_for_p4(e, "etm_clean.csv")
+    # Самые главные файлы для сверки сохраняем в отдельную подпапку reconciliation_ready
+    save_for_reconciliation(a, "acts_clean.csv")
+    save_for_reconciliation(e, "etm_clean.csv")
     
     # Остальные вспомогательные отчеты и файлы ошибок сохраняем в общую папку
-    save(acts[acts.n_tickets > 0].explode("tickets10").rename(columns={"tickets10": "ticket10"})
+    save(split_money(acts[acts.n_tickets > 0], "tickets10", "debt_delta").rename(columns={"tickets10": "ticket10"})
          [["subagent", "period", "date", "line_type", "doc", "pnr", "airline", "ticket10", "debt_delta"]],
          "acts_tickets_long.csv")
-    save(etm[etm.n_tickets > 0].explode("tickets13").assign(ticket10=lambda d: d.tickets13.str[-10:])
+    save(split_money(etm[etm.n_tickets > 0], "tickets13", "amount_kgs").assign(ticket10=lambda d: d.tickets13.str[-10:])
          [["subagent", "agreement_id", "txn_id", "date", "period", "kind_en", "creator_en", "pnr", "tickets13", "ticket10",
             "n_tickets", "amount_kgs", "currency", "amount", "fx_rate"]].rename(columns={"tickets13": "ticket13"}),
          "etm_tickets_long.csv")
@@ -290,4 +323,4 @@ if __name__ == "__main__":
     log = pd.concat([la, le])
     save(log, "cleaning_log.csv")
     print(log.to_string(index=False))
-    print(f"\n[ГОТОВО] Основные файлы для Р4 сохранены в: {p4_folder.resolve()}")
+    print(f"\n[ГОТОВО] Основные файлы для сверки сохранены в: {reconciliation_folder.resolve()}")
