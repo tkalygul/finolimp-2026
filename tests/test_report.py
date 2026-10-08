@@ -258,6 +258,19 @@ def test_old_reconciliation_is_not_in_report(full_interim, tmp_path):
     assert "Сверка по субагентам" not in wb.sheetnames
 
 
+def test_bridge_table_signed_residual_components():
+    columns=set(report.BRIDGE_CAUSES) | set(report.BRIDGE_ROUNDING)
+    row={name:0.0 for name in columns}
+    row.update(subagent_id='a',period='2026-01',act_exists=True,saldo_start=0.,
+        etm_balance_start=0.,opening_difference=0.,closing_difference=25.,unexplained=25.,
+        saldo_end=20.,etm_balance_end=5.,component_gap=10.,check_1c=-20.,check_etm=5.)
+    table=report.bridge_table(pd.DataFrame([row]),{})
+    assert table['Непокрытый оборот в остатке, сом'].iloc[0]==10
+    assert table['Вклад внутренней разницы 1С в остаток, сом'].iloc[0]==20
+    assert table['Вклад внутренней разницы ETM в остаток, сом'].iloc[0]==-5
+    assert table['Проверка разложения остатка, сом'].iloc[0]==0
+
+
 def test_fixed_reconciliation_adds_bridge(full_interim, tmp_path):
     src, _ = full_interim
     folder = tmp_path / "interim"

@@ -4,6 +4,24 @@ from src.balance import build_balance, build_balance_summary
 
 
 class BalanceTests(unittest.TestCase):
+    def test_residual_decomposition_with_uncovered_turnover(self):
+        b,_,_,_=self.calculate([self.act(start=-500,end=-390)],
+            [self.etm()],missing_component=True)
+        row=b.iloc[0]
+        self.assertAlmostEqual(row.residual_uncovered_turnover,row.component_gap)
+        self.assertAlmostEqual(row.residual_internal_1c,-row.check_1c)
+        self.assertAlmostEqual(row.residual_internal_etm,-row.check_etm)
+        self.assertAlmostEqual(row.unexplained,
+            row.residual_uncovered_turnover+row.residual_internal_1c+row.residual_internal_etm)
+        self.assertAlmostEqual(row.residual_decomposition_check,0)
+
+    def test_unknown_residual_components_stay_unknown(self):
+        b,_,_,_=self.calculate([self.act(period='2026-02')],[self.etm()],months=['2026-01','2026-02'])
+        first=b.iloc[0]
+        self.assertTrue(pd.isna(first.unexplained))
+        self.assertTrue(pd.isna(first.residual_internal_1c))
+        self.assertTrue(pd.isna(first.residual_decomposition_check))
+
     def act(self, period="2026-01", start=-500, end=-400, amount=100):
         return dict(subagent_key="a", period=period, saldo_start=start, saldo_end=end, debt_delta=amount)
 

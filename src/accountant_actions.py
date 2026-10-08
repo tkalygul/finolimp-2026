@@ -75,9 +75,23 @@ def build_accountant_actions(classified, bridge, anomalies=None):
         de=float(etm.proposed_delta.sum()); dc=float(onec.proposed_delta.sum())
         before=last.closing_difference
         after=before+de+dc if pd.notna(before) else np.nan
+        scenario_change = abs(after) - abs(before) if pd.notna(before) and pd.notna(after) else np.nan
+        scenario_warning = ''
+        if pd.isna(scenario_change):
+            scenario_assessment = 'Неизвестно'
+        elif scenario_change > TOLERANCE:
+            scenario_assessment = 'Увеличивается'
+            scenario_warning = ('После предложенных исправлений общая разница увеличивается. '
+                'Необходима проверка остальных расхождений и истории проводок. '
+                'Исправление отдельной операции может убрать взаимную компенсацию ошибок.')
+        elif scenario_change < -TOLERANCE:
+            scenario_assessment = 'Уменьшается'
+        else:
+            scenario_assessment = 'Без изменения'
         unknown=int(b.closing_difference.isna().sum())
         residual=float(b.unexplained.abs().sum()) if b.unexplained.notna().all() else np.nan
         questions=[]
+        if scenario_warning: questions.append(scenario_warning)
         if len(review): questions.append(f'Установить причину {len(review)} групп расхождений')
         if outside: questions.append(f'Проверить {outside} предложений вне полного периода моста; они не включены в сценарий')
         if linked_anomalies: questions.append(f'Проверить {len(linked_anomalies)} сигналов аномалий; суммы не складывать')
@@ -94,6 +108,8 @@ def build_accountant_actions(classified, bridge, anomalies=None):
             closing_difference=before,etm_delta_after_confirmation=de,onec_debt_delta_after_confirmation=dc,
             approved_etm_delta=0.0,approved_onec_delta=0.0,
             expected_difference_after_proposals=after,remaining_difference_without_approval=before,
+            scenario_absolute_change=scenario_change,scenario_assessment=scenario_assessment,
+            scenario_warning=scenario_warning,
             etm_action='; '.join(f"{r.direction} депозит на {abs(r.proposed_delta):.2f} сом ({r.match_id})" for r in etm.itertuples()) or 'Нет обоснованного предложения',
             onec_action='; '.join(f"{r.direction} долг на {abs(r.proposed_delta):.2f} сом ({r.match_id})" for r in onec.itertuples()) or 'Нет обоснованного предложения',
             clarify='; '.join(questions) or 'Расхождений, требующих действий, не обнаружено',
@@ -123,10 +139,13 @@ SUMMARY_RU={'subagent_id':'Субагент','period_from':'Период с','pe
  'closing_difference':'Разница на конец, сом','etm_delta_after_confirmation':'Предложение ETM со знаком, сом',
  'onec_debt_delta_after_confirmation':'Предложение 1С со знаком, сом','approved_etm_delta':'Подтверждено ETM, сом',
  'approved_onec_delta':'Подтверждено 1С, сом','expected_difference_after_proposals':'Разница в сценарии после подтверждения, сом',
+ 'scenario_absolute_change':'Изменение модуля общей разницы, сом',
+ 'scenario_assessment':'Общая разница после предложений',
+ 'scenario_warning':'Предупреждение по сценарию',
  'remaining_difference_without_approval':'Разница до подтверждения, сом','etm_action':'Что изменить в ETM',
  'onec_action':'Что исправить в 1С','clarify':'Что сначала выяснить','review_groups':'Групп для выяснения',
  'anomaly_count':'Сигналов аномалий','unknown_months':'Месяцев с неизвестным балансом',
- 'unexplained_absolute_total':'Необъясненные остатки по модулю, сом','match_ids':'Связанные группы','status':'Статус','note':'Пояснение знаков'}
+ 'unexplained_absolute_total':'Сумма модулей месячных необъясненных остатков, сом','match_ids':'Связанные группы','status':'Статус','note':'Пояснение знаков'}
 DETAIL_RU={'match_id':'ID группы сопоставления','subagent_id':'Субагент','period':'Период','ticket10':'Билет',
  'error_type':'Код ошибки','error_owner':'Предполагаемый источник','confidence':'Уверенность правила','target':'Где исправить',
  'proposed_delta':'Изменение со знаком, сом','direction':'Направление','action':'Действие бухгалтера','status':'Статус',

@@ -31,6 +31,27 @@ class AccountantTests(unittest.TestCase):
         self.assertEqual(summary.approved_etm_delta.iloc[0],0)
         self.assertEqual(summary.remaining_difference_without_approval.iloc[0],20)
 
+    def test_worsening_total_keeps_correct_local_proposal(self):
+        s,d=self.run_actions(bridge=self.bridge(closing_difference=-100))
+        self.assertEqual(d.proposed_delta.iloc[0],-20)
+        self.assertEqual(s.expected_difference_after_proposals.iloc[0],-120)
+        self.assertEqual(s.scenario_absolute_change.iloc[0],20)
+        self.assertEqual(s.scenario_assessment.iloc[0],'Увеличивается')
+        self.assertIn('истории проводок',s.scenario_warning.iloc[0])
+        self.assertIn(s.scenario_warning.iloc[0],s.clarify.iloc[0])
+
+    def test_improving_scenario_has_no_warning(self):
+        s,_=self.run_actions()
+        self.assertEqual(s.scenario_assessment.iloc[0],'Уменьшается')
+        self.assertEqual(s.scenario_absolute_change.iloc[0],-20)
+        self.assertEqual(s.scenario_warning.iloc[0],'')
+
+    def test_unknown_scenario_is_not_assessed_as_improved(self):
+        s,_=self.run_actions(bridge=self.bridge(closing_difference=float('nan')))
+        self.assertEqual(s.scenario_assessment.iloc[0],'Неизвестно')
+        self.assertTrue(pd.isna(s.scenario_absolute_change.iloc[0]))
+        self.assertEqual(s.scenario_warning.iloc[0],'')
+
     def test_overcharged_etm_increases_deposit(self):
         summary,_=self.run_actions(self.operation(amount_etm=120),self.bridge(closing_difference=-20))
         self.assertEqual(summary.etm_delta_after_confirmation.iloc[0],20)
