@@ -22,12 +22,15 @@
 """
 import argparse
 import sys
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from src.normalize import subagent_key
+from src.classification import CATALOG, load_reconciliation_classification
+from src.anomalies import detect_canonical_anomalies
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CORPORATE_CLIENTS_CSV = REPO_ROOT / "reference" / "corporate_clients.csv"
@@ -85,6 +88,8 @@ ERROR_TYPES = {
     "all_differ": ("unclear", "Все три источника дают разные суммы"),
     "sources_differ": ("unclear", "Два источника расходятся, третьего для арбитража нет"),
 }
+
+ERROR_TYPES.update(CATALOG)
 
 # Уточнение для ошибок в сумме
 ISSUE_RU = {
@@ -660,6 +665,10 @@ def summarize(tickets, payments, anomalies) -> dict:
 
     # Ошибки агентов по сотрудникам, которые вносили строки в реестр
     t = tickets[tickets["created_by"].notna() & tickets["created_by"].astype(str).ne("")].copy()
+    if "employee_ids" in t:
+        t["created_by"] = t.employee_ids.map(json.loads)
+        t = t.explode("created_by")
+        t = t[t.created_by.notna()].drop_duplicates(["match_id","created_by"])
     t["agent_error"] = t["error_owner"].eq("agent").astype(int)
     by_emp = t.groupby("created_by").agg(rows=("agent_error", "size"), agent_errors=("agent_error", "sum"))
     by_emp["error_rate"] = (by_emp["agent_errors"] / by_emp["rows"]).round(4)
@@ -678,21 +687,44 @@ def error_types_table() -> pd.DataFrame:
 # ЧАСТЬ 7. ЗАПУСК
 # ================================================================
 
-def run_p5(clean_dir="interim/clean", registry_path="interim/registry.parquet", out_dir="interim/p5") -> dict:
+def run_p5(clean_dir="interim/clean", registry_path="interim/registry.parquet", out_dir="interim/p5", require_reconciliation=False) -> dict:
     """Полный шаг P5: классификация, оплаты, аномалии, сводки, запись файлов."""
     acts, etm, registry = load_inputs(clean_dir, registry_path)
 
-    ledger = build_ticket_ledger(acts, etm, registry)
-    tickets = classify_tickets(ledger)
-    payments = classify_payments(match_payments(acts, etm), acts)
-    anomalies = detect_anomalies(acts, etm, registry, payments)
+    matching_dir = Path(clean_dir).parent / "reconciliation"
+    canonical = (matching_dir / "operation_matches.csv").exists()
+    if require_reconciliation and not canonical:
+        raise FileNotFoundError("Сначала выполните сопоставление сверки и мост баланса")
+    if canonical:
+        classified, balance_review, links = load_reconciliation_classification(matching_dir)
+        tickets = classified[classified.op_type.ne("payment")].copy()
+        payments = classified[classified.op_type.eq("payment")].copy()
+    else:
+        # Compatibility for standalone historical fixtures; the main pipeline requires сверки.
+        ledger = build_ticket_ledger(acts, etm, registry)
+        tickets = classify_tickets(ledger)
+        payments = classify_payments(match_payments(acts, etm), acts)
+    if canonical:
+        components=pd.read_csv(matching_dir/"match_components.csv",encoding="utf-8-sig",dtype={"ticket10":str},low_memory=False)
+        # Supplementary input-quality checks remain; canonical payments are never rematched.
+        extras=detect_anomalies(acts,etm,registry,payments)
+        anomalies,employee_stats=detect_canonical_anomalies(classified,components,extras)
+    else:
+        anomalies = detect_anomalies(acts, etm, registry, payments)
     summary = summarize(tickets, payments, anomalies)
+    if canonical:
+        summary["employee"]=employee_stats
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     def save(df, name):
         df.to_csv(out / name, index=False, encoding="utf-8-sig")
+    if canonical:
+        save(classified,"p5_group_classification.csv")
+        save(balance_review,"p5_balance_review.csv")
+        save(links,"p5_classification_balance_links.csv")
+        save(employee_stats,"p5_employee_concentration.csv")
 
     save(tickets, "p5_ticket_classified.csv")
     save(payments, "p5_payments.csv")
@@ -743,7 +775,7 @@ def main(argv=None) -> int:
     parser.add_argument("--out", default="interim/p5", help="Куда сохранить результаты")
     args = parser.parse_args(argv)
     try:
-        result = run_p5(args.clean, args.registry, args.out)
+        result = run_p5(args.clean, args.registry, args.out, require_reconciliation=True)
     except FileNotFoundError as exc:
         print(f"[P5] Нет входного файла: {exc}. Сначала запустите reconcile.py (шаги P2 и P3).")
         return 1
