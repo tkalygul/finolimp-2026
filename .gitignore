@@ -237,3 +237,5 @@ interim/
 *.tmp
 
 .presentation_build/
+
+/delivery/
