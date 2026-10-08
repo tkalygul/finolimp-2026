@@ -118,6 +118,15 @@ def build_balance(acts, etm, matches, components):
     bridge["turnover_difference"] = bridge.turnover_1c + bridge.turnover_etm
     bridge["component_gap"] = bridge.turnover_difference - bridge.explained_turnover_difference
     bridge["unexplained"] = bridge.closing_difference - bridge.opening_difference - bridge.explained_turnover_difference
+    # Signed diagnostic components of the existing residual, not new transactions.
+    bridge["residual_uncovered_turnover"] = bridge.component_gap
+    bridge["residual_internal_1c"] = -bridge.check_1c
+    bridge["residual_internal_etm"] = -bridge.check_etm
+    bridge["residual_decomposition_check"] = (bridge.unexplained -
+        (bridge.residual_uncovered_turnover + bridge.residual_internal_1c + bridge.residual_internal_etm))
+    known = bridge.unexplained.notna()
+    if bridge.loc[known, "residual_decomposition_check"].abs().gt(1e-6).any():
+        raise ValidationError("Residual decomposition does not match the balance bridge")
     bridge["bridge_check"] = bridge.opening_difference + bridge.explained_turnover_difference + bridge.unexplained - bridge.closing_difference
     bridge["unresolved_cause_contribution"] = bridge.ops_ambiguous + bridge.payments_ambiguous + bridge.ops_unclassified
     bridge["bridge_status"] = np.select(

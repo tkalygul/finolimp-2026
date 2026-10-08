@@ -1,16 +1,3 @@
-"""P3: Сборка итогового Excel-отчёта для бухгалтера.
-
-Листы:
-    Сводка, По субагентам, Ошибки по типам, Расхождения по билетам, Оплаты с ошибкой, Аномалии,
-    Сотрудники реестра, Справочник ошибок  — результаты P5 (interim/p5), если P5 запускали
-    Мост баланса, Сверка по субагентам  — результаты сверки (interim/reconciliation), только исправленной версии
-    Сводка реестра, Проблемные строки, Корпоративные, Дубли реестра  — разбор реестра (P3), всегда
-
-Как запустить:
-    python -m src.report <папка_interim> <файл_отчёта.xlsx>
-Пример:
-    python -m src.report interim report/reconciliation_report.xlsx
-"""
 import sys
 from pathlib import Path
 
@@ -58,6 +45,9 @@ BRIDGE_CAUSES = {
 BRIDGE_ROUNDING = ["ops_matched", "ops_voided", "payments_matched"]
 BRIDGE_NOTE = ("Разница = сальдо 1С + баланс ETM (в ETM долг субагента со знаком минус). "
                "Разница на начало + вклады операций + «Не объяснено» = разница на конец. "
+               "Не объяснено = непокрытый оборот - внутренняя разница 1С - внутренняя разница ETM. "
+               "Эти компоненты поясняют остаток и не добавляются повторно к оборотам. "
+               "Сумма модулей месячных остатков не является долгом или убытком. "
                "Пустое сальдо означает неизвестный баланс. Числовое сведение не подтверждает причину ошибки.")
 
 ANOMALY_RU = {
@@ -502,6 +492,12 @@ def bridge_table(bridge, names) -> pd.DataFrame:
     df["Остатки сопоставленных операций, сом"] = b[BRIDGE_ROUNDING].sum(axis=1).round(2)
     df["Разница на конец, сом"] = b["closing_difference"]
     df["Не объяснено, сом"] = b["unexplained"]
+    if {"component_gap", "check_1c", "check_etm"}.issubset(b.columns):
+        df["Непокрытый оборот в остатке, сом"] = b.component_gap
+        df["Вклад внутренней разницы 1С в остаток, сом"] = -b.check_1c
+        df["Вклад внутренней разницы ETM в остаток, сом"] = -b.check_etm
+        df["Проверка разложения остатка, сом"] = (b.unexplained -
+            (b.component_gap - b.check_1c - b.check_etm))
     df["Сальдо 1С на конец, сом"] = b["saldo_end"]
     df["Баланс ETM на конец, сом"] = b["etm_balance_end"]
     if "bridge_status" in b:
@@ -538,7 +534,7 @@ def reconciliation_summary_table(summary, names) -> pd.DataFrame:
     })
     if "unknown_months" in s:
         df["Месяцев с неизвестной разницей"] = s.unknown_months
-        df["Не объяснено по модулю, сом"] = s.unexplained_absolute_total
+        df["Сумма модулей месячных необъясненных остатков, сом"] = s.unexplained_absolute_total
         df["Групп для проверки"] = s.unresolved_groups
     return df.sort_values("Субагент").reset_index(drop=True)
 
@@ -609,7 +605,8 @@ def build_report(interim_dir, out_path) -> Path:
             summary=summary.copy(); details=details.copy()
             summary['subagent_id']=_names(summary.subagent_id,names)
             details['subagent_id']=_names(details.subagent_id,names)
-            write_sheet(writer,'Действия бухгалтера',summary.rename(columns=SUMMARY_RU))
+            write_sheet(writer,'Действия бухгалтера',summary.rename(columns=SUMMARY_RU),
+                        highlight=summary.scenario_assessment.eq('Увеличивается').tolist())
             write_sheet(writer,'Детали действий',details.rename(columns=DETAIL_RU))
         if p5:
             write_blocks(writer, "Сводка", overview_blocks(p5, reconciliation, names))
