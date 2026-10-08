@@ -53,6 +53,7 @@ class LoadResult:
     rejects: pd.DataFrame
     non_subagents: pd.DataFrame
     stats: dict = field(default_factory=dict)
+    audit: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # ================================================================
@@ -263,7 +264,7 @@ def load_registry(data_dir, etm_keys=None, ticket_agents=None, corporate_keys=No
         dup_group.append(first)
         is_dup_extra.append(first != rid)
 
-    out_rows, reject_rows, corporate_rows = [], [], []
+    out_rows, reject_rows, corporate_rows, audit_rows = [], [], [], []
     reason_counts = Counter()
     for i, row in enumerate(src[SOURCE_COLUMNS].to_dict("records")):
         rid = row_ids[i]
@@ -278,6 +279,9 @@ def load_registry(data_dir, etm_keys=None, ticket_agents=None, corporate_keys=No
                                    "amount_row_kgs": p["amount_row_kgs"], **row})
         pay = p.get("pay")
         n = len(p["tickets"])
+        audit_rows.append({"row_id": rid, "source_row": i + 2,
+            "disposition": "problem" if p["reasons"] else ("corporate" if p.get("party_type") == "corporate" else "accepted"),
+            "parse_status": status, "output_tickets": n, "amount_row_kgs": p.get("amount_row_kgs")})
         for seq, ticket in enumerate(p["tickets"], start=1):
             out_rows.append({
                 "source": "registry", "row_id": rid, "subagent_id": p["subagent_id"],
@@ -326,7 +330,16 @@ def load_registry(data_dir, etm_keys=None, ticket_agents=None, corporate_keys=No
         "rows_without_tickets": int(sum(1 for r in reject_rows
                                         if any(x in r["parse_status"] for x in ("no_tickets", "bad_ticket_format", "duplicate_ticket_in_cell", "empty_row")))),
     }
-    return LoadResult(registry, rejects, non_subagents, stats)
+    audit = pd.DataFrame(audit_rows)
+    sums = registry.groupby("row_id").amount_kgs.sum(min_count=1)
+    expected = audit.set_index("row_id").amount_row_kgs
+    comparable = audit.loc[audit.output_tickets.gt(0) & audit.amount_row_kgs.notna(), "row_id"]
+    gaps = sums.reindex(comparable).subtract(expected.reindex(comparable)).abs()
+    if gaps.gt(1e-6).any():
+        raise ValidationError("[Registry] Потеря суммы при разбиении билетов")
+    stats["row_accounting_ok"] = len(audit) == n_src and audit.row_id.is_unique
+    stats["split_amount_max_gap"] = float(gaps.max()) if len(gaps) else 0.0
+    return LoadResult(registry, rejects, non_subagents, stats, audit)
 
 
 def _typed(df) -> pd.DataFrame:
@@ -353,11 +366,13 @@ def write_outputs(result, out_dir) -> dict:
         "rejects": out / "registry_rejects.csv",
         "non_subagents": out / "registry_non_subagents.csv",
         "report": out / "registry_load_report.txt",
+        "audit": out / "registry_source_row_audit.csv",
     }
     result.registry.to_parquet(paths["registry"], index=False)
     # utf-8-sig, чтобы Excel открывал кириллицу
     result.rejects.to_csv(paths["rejects"], index=False, encoding="utf-8-sig")
     result.non_subagents.to_csv(paths["non_subagents"], index=False, encoding="utf-8-sig")
+    result.audit.to_csv(paths["audit"], index=False, encoding="utf-8-sig")
     paths["report"].write_text(format_stats(result.stats), encoding="utf-8")
     return paths
 

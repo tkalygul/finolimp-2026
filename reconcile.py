@@ -1,125 +1,159 @@
+"""One command, isolated run directory, reproducible evidence and readable failures."""
 import argparse
+from contextlib import redirect_stdout, redirect_stderr
+from datetime import datetime, timezone
+import hashlib
+import importlib.metadata
+import json
 import os
+from pathlib import Path
+import platform
 import random
+import shutil
 import subprocess
 import sys
+import uuid
 import numpy as np
 import pandas as pd
-
-# Импортируем нашу схему валидации и загрузчик реестра (P3)
-from src.schema import validate, ValidationError
-from src.load_registry import InputFileError, load_registry, write_outputs
+from src.schema import ValidationError, validate
+from src.load_registry import InputFileError, find_input_file, load_registry, write_outputs
 from src.classify_errors import format_report as format_p5_report, run_p5
 from src.report import build_report
+from src.matching import run_matching
+from src.balance import run_balance
+from src.ml_risk import run_ml, MLUnavailableError
+
+PROJECT=Path(__file__).resolve().parent
 
 
-def fix_random_seed(seed: int = 42):
-    """Фиксирует random seed для воспроизводимости результатов."""
-    random.seed(seed)
-    np.random.seed(seed)
-    print(f"[Seed] Random seed зафиксирован: {seed}")
+class Tee:
+    def __init__(self,*streams): self.streams=streams
+    def write(self,text):
+        for stream in self.streams: stream.write(text); stream.flush()
+        return len(text)
+    def flush(self):
+        for stream in self.streams: stream.flush()
 
 
-def parse_args():
-    """Парсинг аргументов командной строки."""
-    parser = argparse.ArgumentParser(
-        description="Инструмент автоматической сверки данных FinOlimp 2026"
-    )
-    parser.add_argument(
-        "--data",
-        type=str,
-        required=True,
-        help="Путь к папке с входными файлами (acts.csv, etm.csv, registry.csv)"
-    )
-    parser.add_argument(
-        "--out",
-        type=str,
-        required=True,
-        help="Путь к папке для сохранения итогового отчета"
-    )
-    return parser.parse_args()
+def sha256(path):
+    digest=hashlib.sha256()
+    with Path(path).open('rb') as handle:
+        for block in iter(lambda:handle.read(1024*1024),b''): digest.update(block)
+    return digest.hexdigest()
 
 
-def main():
-    fix_random_seed(42)
-    args = parse_args()
+def check_inputs(data_dir):
+    folder=Path(data_dir).resolve()
+    files={kind:find_input_file(folder,kind+'.csv' if kind!='registry' else 'registry*.csv')
+           for kind in ['acts','etm','registry']}
+    for kind,path in files.items():
+        try: header=pd.read_csv(path,nrows=1,encoding='utf-8-sig')
+        except (UnicodeError,pd.errors.ParserError,pd.errors.EmptyDataError) as exc:
+            raise InputFileError(f'Не удалось прочитать {path.name}: {exc}') from exc
+        validate(header,kind)
+    return files
 
-    print("=" * 60)
-    print("=== ЗАПУСК ПАЙПЛАЙНА СВЕРКИ FINOLIMP 2026 ===")
-    print("=" * 60)
-    print(f"Папка с данными: {args.data}")
-    print(f"Папка для отчета: {args.out}")
 
-    # Убедимся, что выходная папка и interim существуют
-    os.makedirs(args.out, exist_ok=True)
-    os.makedirs("interim", exist_ok=True)
+def parse_args(argv=None):
+    parser=argparse.ArgumentParser(description='Сверка 1С/ETM/реестра и отчет для бухгалтера')
+    parser.add_argument('--data',required=True,help='Папка: acts.csv, etm.csv, один registry*.csv')
+    parser.add_argument('--out',required=True,help='Папка результата; каждый запуск сохраняется отдельно')
+    parser.add_argument('--verified-labels',help='CSV независимой разметки ML')
+    parser.add_argument('--skip-ml',action='store_true',help='Сформировать сверку без обучения модели')
+    return parser.parse_args(argv)
 
-    # Пути к файлам, реестр ищет сам загрузчик (registry*.csv)
-    acts_path = os.path.join(args.data, "acts.csv")
-    etm_path = os.path.join(args.data, "etm.csv")
 
-    # Проверка наличия файлов
-    for path in [acts_path, etm_path]:
-        if not os.path.exists(path):
-            print(f"[Ошибка] Не найден обязательный файл: {path}")
-            sys.exit(1)
+def environment():
+    versions={}
+    for package in ['pandas','numpy','openpyxl','pyarrow','pytest']:
+        try: versions[package]=importlib.metadata.version(package)
+        except importlib.metadata.PackageNotFoundError: versions[package]='not installed'
+    return {'python':platform.python_version(),'platform':platform.platform(),'packages':versions}
 
+
+def run_pipeline(data_dir,out_dir,verified_labels=None,skip_ml=False):
+    data=Path(data_dir).resolve(); out=Path(out_dir).resolve()
+    if out.is_relative_to(data): raise InputFileError('Папка результата должна находиться вне папки исходных данных')
+    files=check_inputs(data)
+    if verified_labels and not Path(verified_labels).is_file(): raise InputFileError('Не найден CSV независимой разметки ML')
+    out.mkdir(parents=True,exist_ok=True)
+    identifier=datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+uuid.uuid4().hex[:8]
+    run=out/'runs'/identifier; interim=run/'interim'; interim.mkdir(parents=True)
+    info={'run_id':identifier,'status':'running','seed':42,'environment':environment(),
+          'inputs':{kind:{'path':str(path),'sha256':sha256(path)} for kind,path in files.items()},
+          'source_sha256':{str(path.relative_to(PROJECT)):sha256(path) for path in
+                           sorted(list((PROJECT/'src').glob('*.py'))+[PROJECT/'reconcile.py',PROJECT/'cleaning.py'])},
+          'parameters':{'skip_ml':skip_ml,'verified_labels':str(Path(verified_labels).resolve()) if verified_labels else None}}
+    if verified_labels: info['verified_labels_sha256']=sha256(verified_labels)
+    def manifest(): (run/'run_manifest.json').write_text(json.dumps(info,ensure_ascii=False,indent=2),encoding='utf-8')
+    manifest()
+    with (run/'run.log').open('w',encoding='utf-8') as log, redirect_stdout(Tee(sys.stdout,log)), redirect_stderr(Tee(sys.stderr,log)):
+        try:
+            random.seed(42); np.random.seed(42)
+            print(f'Запуск: {identifier}\nРезультаты и диагностика: {run}')
+            print('\nЭтап 1: проверка и очистка выгрузок')
+            clean=interim/'clean'; matching=interim/'reconciliation'
+            env=os.environ.copy(); env['PYTHONUTF8']='1'
+            process=subprocess.run([sys.executable,str(PROJECT/'cleaning.py'),str(data),str(clean)],
+                                   capture_output=True,text=True,encoding='utf-8',errors='replace',env=env)
+            print(process.stdout)
+            if process.returncode:
+                print(process.stderr)
+                raise ValidationError(f'Очистка остановлена. Проверьте {clean / "data_quality_issues.csv"} и журнал запуска')
+            registry=load_registry(data); write_outputs(registry,interim)
+            print('\nЭтап 2: сопоставление операций')
+            run_matching(clean,interim/'registry.parquet',matching)
+            print('\nЭтап 3: мост баланса')
+            run_balance(clean,matching)
+            print('\nЭтапы 4–5: классификация и аномалии')
+            result=run_p5(clean,interim/'registry.parquet',interim/'p5',require_reconciliation=True)
+            print(format_p5_report(result))
+            print('\nЭтап 7: модель риска')
+            ml_status={'status':'skipped','reason':'Обучение отключено параметром --skip-ml'}
+            if not skip_ml:
+                try:
+                    metrics=run_ml(interim,verified_labels)
+                    ml_status={'status':'trained','label_basis':metrics['label_basis']}
+                except MLUnavailableError as exc:
+                    ml_status={'status':'unavailable','reason':str(exc)}
+                    print(f'Модель не обучена: {exc}. Сверка и отчет будут сформированы.')
+            (interim/'ml').mkdir(exist_ok=True)
+            (interim/'ml/status.json').write_text(json.dumps(ml_status,ensure_ascii=False,indent=2),encoding='utf-8')
+            info['ml']=ml_status
+            print('\nЭтап 6: действия бухгалтера и итоговый Excel')
+            report=build_report(interim,run/'reconciliation_report.xlsx')
+            # Atomic publication: a failed run preserves the last successful report.
+            temporary=out/(identifier+'.xlsx.tmp')
+            shutil.copyfile(report,temporary); os.replace(temporary,out/'reconciliation_report.xlsx')
+            info['status']='completed'; info['report']=str(report)
+            info['outputs_sha256']={str(path.relative_to(run)):sha256(path) for path in sorted(interim.rglob('*'))
+                                    if path.is_file() and path.suffix in ['.csv','.json']}
+            manifest()
+            pointer=out/(identifier+'.json.tmp')
+            pointer.write_text(json.dumps({'run_id':identifier,'run_dir':str(run),'report':str(report),'ml':ml_status},ensure_ascii=False,indent=2),encoding='utf-8')
+            os.replace(pointer,out/'latest_run.json')
+            print(f'\nГотово. Откройте {out / "reconciliation_report.xlsx"}')
+            print(f'Архив запуска: {run}')
+        except Exception as exc:
+            info['status']='failed'; info['error']=str(exc); manifest()
+            print(f'Запуск остановлен: {exc}\nДиагностика сохранена: {run / "run.log"}')
+            raise
+    return run
+
+
+def main(argv=None):
+    args=parse_args(argv)
     try:
-        print("\n--- ШАГ 1: Загрузка и первичная валидация данных (P2, P3) ---")
-        acts_df = pd.read_csv(acts_path)
-        etm_df = pd.read_csv(etm_path)
-
-        # Прогоняем через наш валидатор из schema.py
-        validate(acts_df, dataset_type="acts")
-        validate(etm_df, dataset_type="etm")
-
-        # Очистка актов 1С и ETM (P2), результат в interim/clean
-        clean_dir = os.path.join("interim", "clean")
-        cleaning_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cleaning.py")
-        subprocess.run([sys.executable, cleaning_script, args.data, clean_dir], check=True)
-
-        # Загрузка и разбор реестра (P3), результат в interim
-        registry_result = load_registry(args.data)
-        write_outputs(registry_result, "interim")
-
-        print("[Шаг 1] Загрузка, валидация и очистка успешно завершены.")
-
-        # --- ШАГ 2: Сопоставление и баланс (P4) ---
-        print("\n--- ШАГ 2: Сопоставление транзакций и сведение баланса (P4) ---")
-        # TODO: Здесь P4 подключает логику матчинга и построения моста баланса
-        print("[Шаг 2] (Заглушка) Сопоставление выполнено.")
-
-        # --- ШАГ 3: Классификация расхождений и аномалии (P5) ---
-        print("\n--- ШАГ 3: Классификация расхождений и поиск аномалий (P5) ---")
-        p5_result = run_p5(clean_dir, os.path.join("interim", "registry.parquet"), os.path.join("interim", "p5"))
-        print(format_p5_report(p5_result))
-        print("[Шаг 3] Классификация выполнена, результаты в interim/p5.")
-
-        # --- ШАГ 4: ML-модель предсказания рисков (P6) ---
-        print("\n--- ШАГ 4: Запуск модели оценки рисков (P6) ---")
-        # TODO: Здесь P6 запускает обучение/предсказание модели и расчет метрик
-        print("[Шаг 4] (Заглушка) Модель отработала.")
-
-        # --- ШАГ 5: Генерация итогового Excel-отчета (P3 / P2) ---
-        print("\n--- ШАГ 5: Генерация отчета для бухгалтера (P3) ---")
-        # Отчёт собирается из interim: реестр (P3), ошибки и аномалии (P5), мост баланса (P4)
-        output_report_path = os.path.join(args.out, "reconciliation_report.xlsx")
-        build_report("interim", output_report_path)
-        print(f"[Шаг 5] Отчет успешно сохранен в: {output_report_path}")
-
-    except (ValidationError, InputFileError) as ve:
-        print(f"\n[КРИТИЧЕСКАЯ ОШИБКА ВАЛИДАЦИИ]: {ve}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n[ОШИБКА В ПАЙПЛАЙНЕ]: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-
-    print("\n" + "=" * 60)
-    print("=== ВСЕ ЭТАПЫ ПАЙПЛАЙНА УСПЕШНО ЗАВЕРШЕНЫ ===")
-    print("=" * 60)
+        run_pipeline(args.data,args.out,args.verified_labels,args.skip_ml)
+        return 0
+    except (ValidationError,InputFileError,PermissionError,FileNotFoundError,ImportError) as exc:
+        print(f'Ошибка: {exc}',file=sys.stderr)
+        if isinstance(exc,PermissionError): print('Закройте Excel, проверьте доступ к папке результата и повторите запуск.',file=sys.stderr)
+        if isinstance(exc,ImportError): print('Установите зависимости: python -m pip install -r requirements-lock.txt',file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f'Неожиданная ошибка: {exc}. Подробности находятся в run.log последнего запуска.',file=sys.stderr)
+        return 1
 
 
-if __name__ == "__main__":
-    main()
+if __name__=='__main__': sys.exit(main())

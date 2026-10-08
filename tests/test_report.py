@@ -113,7 +113,7 @@ def full_interim(interim, tmp_path_factory):
     src, _ = interim
     folder = tmp_path_factory.mktemp("full") / "interim"
     shutil.copytree(src, folder)
-    ready = folder / "clean" / "p4_ready"
+    ready = folder / "clean" / "reconciliation_ready"
     ready.mkdir(parents=True)
     acts = pd.DataFrame([
         act("alpha", "2026-01", "Реализация KV AAAAAA", "1000000001", debet=1000.0),
@@ -219,17 +219,17 @@ def test_partial_p5_fails_loudly(interim, tmp_path):
 
 
 # ================================================================
-# Листы P4: только исправленная версия (с мостом баланса)
+# Листы сверки: только исправленная версия (с мостом баланса)
 # ================================================================
 
-def _write_p4(folder, fixed=True):
-    p4 = folder / "p4"
-    p4.mkdir(exist_ok=True)
+def _write_reconciliation(folder, fixed=True):
+    reconciliation = folder / "reconciliation"
+    reconciliation.mkdir(exist_ok=True)
     if not fixed:
         pd.DataFrame({"subagent_id": ["alpha"], "period": ["2026-01"], "bridge_check": [624068.31]}) \
-            .to_csv(p4 / "p4_balance_bridge.csv", index=False, encoding="utf-8-sig")
+            .to_csv(reconciliation / "balance_bridge.csv", index=False, encoding="utf-8-sig")
         pd.DataFrame({"subagent_id": ["alpha"], "amount_difference": [-800.0]}) \
-            .to_csv(p4 / "p4_subagent_summary.csv", index=False, encoding="utf-8-sig")
+            .to_csv(reconciliation / "subagent_summary.csv", index=False, encoding="utf-8-sig")
         return
     bridge = {"subagent_id": ["alpha", "alpha"], "period": ["2026-01", "2026-02"], "act_exists": [True, True]}
     for col in (["saldo_start", "etm_balance_start", "opening_difference", "closing_difference", "saldo_end",
@@ -239,34 +239,34 @@ def _write_p4(folder, fixed=True):
     bridge["closing_difference"] = [500.0, 1000.0]
     bridge["opening_difference"] = [0.0, 500.0]
     bridge["unexplained"] = [0.0, 500.0]
-    pd.DataFrame(bridge).to_csv(p4 / "p4_balance_bridge.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(bridge).to_csv(reconciliation / "balance_bridge.csv", index=False, encoding="utf-8-sig")
     summary = {c: [0] for c in ("operations", "matched", "voided", "amount_difference", "only_1c", "only_etm",
                                 "period_mismatch", "payments", "payments_only_1c", "payments_only_etm")}
     summary.update(subagent_id=["alpha"], amount_difference_sum=[0.0], only_1c_amount=[500.0],
                    only_etm_amount=[0.0], closing_difference_last=[1000.0], unexplained_total=[500.0],
                    matched_share=[1.0])
-    pd.DataFrame(summary).to_csv(p4 / "p4_subagent_summary.csv", index=False, encoding="utf-8-sig")
+    pd.DataFrame(summary).to_csv(reconciliation / "subagent_summary.csv", index=False, encoding="utf-8-sig")
 
 
-def test_old_p4_is_not_in_report(full_interim, tmp_path):
+def test_old_reconciliation_is_not_in_report(full_interim, tmp_path):
     src, _ = full_interim
     folder = tmp_path / "interim"
     shutil.copytree(src, folder)
-    _write_p4(folder, fixed=False)
+    _write_reconciliation(folder, fixed=False)
     wb = load_workbook(build_report(folder, tmp_path / "report.xlsx"))
     assert "Мост баланса" not in wb.sheetnames
-    assert "Сверка P4 по субагентам" not in wb.sheetnames
+    assert "Сверка по субагентам" not in wb.sheetnames
 
 
-def test_fixed_p4_adds_bridge(full_interim, tmp_path):
+def test_fixed_reconciliation_adds_bridge(full_interim, tmp_path):
     src, _ = full_interim
     folder = tmp_path / "interim"
     shutil.copytree(src, folder)
-    _write_p4(folder)
+    _write_reconciliation(folder)
     wb = load_workbook(build_report(folder, tmp_path / "report.xlsx"))
     names = wb.sheetnames
     assert names.index("Аномалии") + 1 == names.index("Мост баланса")
-    assert names.index("Мост баланса") + 1 == names.index("Сверка P4 по субагентам")
+    assert names.index("Мост баланса") + 1 == names.index("Сверка по субагентам")
     ws = wb["Мост баланса"]
     assert ws["A1"].value == report.BRIDGE_NOTE
     assert _column(ws, "Субагент", header_row=3) == ["ОсОО Альфа Тур", "ОсОО Альфа Тур"]
@@ -288,6 +288,9 @@ def test_fixed_p4_adds_bridge(full_interim, tmp_path):
 def test_real_data_report(tmp_path):
     p5 = report.read_p5_outputs(REPO / "interim")
     wb = load_workbook(build_report(REPO / "interim", tmp_path / "report.xlsx"), read_only=True)
-    assert wb.sheetnames[0] == "Сводка"
+    assert "Сводка" in wb.sheetnames
+    if (REPO / "interim" / "p5" / "p5_group_classification.csv").exists():
+        assert "Действия бухгалтера" in wb.sheetnames
+        assert "Детали действий" in wb.sheetnames
     errors = int(p5["tickets"]["is_error"].sum())
     assert wb["Расхождения по билетам"].max_row - 1 == errors

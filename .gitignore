@@ -225,3 +225,17 @@ interim/*
 !interim/.gitkeep
 report/*
 !report/.gitkeep
+
+# Stage 8 local environment and outputs
+.venv/
+.stage8-venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+out/
+interim/
+*.tmp
+
+.presentation_build/
+
+/delivery/

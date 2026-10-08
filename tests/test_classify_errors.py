@@ -325,7 +325,7 @@ def test_saldo_gap_and_transfer_suspect():
 # Реальные данные (если пайплайн уже запускали)
 # ================================================================
 
-@pytest.mark.skipif(not (INTERIM / "clean" / "p4_ready" / "acts_clean.csv").exists()
+@pytest.mark.skipif(not (INTERIM / "clean" / "reconciliation_ready" / "acts_clean.csv").exists()
                     or not (INTERIM / "registry.parquet").exists(),
                     reason="нет interim: сначала запустите reconcile.py")
 def test_real_data_smoke(tmp_path):
